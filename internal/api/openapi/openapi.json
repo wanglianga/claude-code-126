@@ -1,0 +1,513 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "咖啡连锁外卖出杯时效与骑手交接服务",
+    "version": "1.0.0",
+    "description": "多平台外卖接单 → 门店产能/库存校验 → 出杯队列/封签/杯贴 → 待取区 → 骑手到店交接核验 → 异常（提前到店/过久重做/漏看备注/错杯/缺货/取错袋/平台取消/漏液投诉）六方联动 → 财务赔付 → 门店利润影响与班组评分复盘。\n\n鉴权：\n- 外卖平台接入：请求头 X-Platform-Key\n- 用户/骑手/顾客：先登录获得 Bearer Token（Authorization: Bearer <token>）"
+  },
+  "servers": [{ "url": "/" }],
+  "tags": [
+    { "name": "auth", "description": "登录与会话" },
+    { "name": "platform", "description": "外卖平台订单接入" },
+    { "name": "catalog", "description": "商品/门店" },
+    { "name": "orders", "description": "订单与交接" },
+    { "name": "production", "description": "出杯队列、封签、重做" },
+    { "name": "store", "description": "门店到店屏、库存、爆单保护、报损" },
+    { "name": "incidents", "description": "异常事件六方联动" },
+    { "name": "finance", "description": "赔付审批与放款" },
+    { "name": "analysis", "description": "区域经理利润影响与督导班组复盘" },
+    { "name": "demo", "description": "演示时钟与过久扫描" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": { "type": "http", "scheme": "bearer" },
+      "PlatformKey": { "type": "apiKey", "in": "header", "name": "X-Platform-Key" }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": { "error": { "type": "string" } },
+        "required": ["error"]
+      },
+      "LoginRequest": {
+        "type": "object",
+        "properties": {
+          "username": { "type": "string" },
+          "password": { "type": "string" }
+        },
+        "required": ["username", "password"]
+      },
+      "TokenResponse": {
+        "type": "object",
+        "properties": {
+          "token": { "type": "string" },
+          "role": { "type": "string" },
+          "name": { "type": "string" },
+          "store_id": { "type": "integer", "nullable": true },
+          "region_id": { "type": "integer", "nullable": true }
+        }
+      },
+      "AcceptItem": {
+        "type": "object",
+        "properties": {
+          "sku": { "type": "string", "example": "P002" },
+          "qty": { "type": "integer", "minimum": 1 },
+          "ice_hot": { "type": "string", "enum": ["ice", "hot", "normal"] },
+          "sugar": { "type": "string", "example": "半糖" },
+          "cup_size": { "type": "string", "example": "大杯" },
+          "remark": { "type": "string" }
+        },
+        "required": ["sku", "qty"]
+      },
+      "AcceptOrderRequest": {
+        "type": "object",
+        "properties": {
+          "platform_code": { "type": "string", "enum": ["meituan", "eleme", "douyin"] },
+          "platform_order_no": { "type": "string" },
+          "store_code": { "type": "string", "example": "SH001" },
+          "customer_code": { "type": "string", "example": "cust1" },
+          "rider_code": { "type": "string", "example": "R001" },
+          "rider_eta": { "type": "string", "format": "date-time" },
+          "ice_hot": { "type": "string", "enum": ["ice", "hot", "normal"] },
+          "sugar": { "type": "string" },
+          "cup_size": { "type": "string" },
+          "remark": { "type": "string" },
+          "merge_group_note": { "type": "string", "description": "非空时把同店多平台订单并入同一合并组", "example": "BUNDLE-A" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/AcceptItem" } }
+        },
+        "required": ["platform_code", "platform_order_no", "store_code", "items"]
+      },
+      "HandoverRequest": {
+        "type": "object",
+        "properties": {
+          "bags_actual": { "type": "integer", "description": "实际袋数" },
+          "hot_cold_split": { "type": "boolean", "description": "冷热是否分袋" },
+          "straw_utensils_ok": { "type": "boolean", "description": "吸管/餐具是否齐全" }
+        },
+        "required": ["bags_actual", "hot_cold_split", "straw_utensils_ok"]
+      },
+      "HandoverResult": {
+        "type": "object",
+        "properties": {
+          "passed": { "type": "boolean" },
+          "order_no_match": { "type": "boolean" },
+          "bags_match": { "type": "boolean" },
+          "hot_cold_split_ok": { "type": "boolean" },
+          "straw_utensils_ok": { "type": "boolean" },
+          "message": { "type": "string" },
+          "incident_id": { "type": "integer", "nullable": true }
+        }
+      },
+      "ReportRequest": {
+        "type": "object",
+        "properties": {
+          "cup_id": { "type": "integer" },
+          "type": {
+            "type": "string",
+            "enum": ["remark_missed", "wrong_cup", "food_oos", "platform_cancel", "leak_complaint"]
+          },
+          "detail": { "type": "string" },
+          "amount": { "type": "number", "description": "漏液等自定义退款金额，可选" }
+        },
+        "required": ["type"]
+      },
+      "SealScanRequest": {
+        "type": "object",
+        "properties": { "seal_code": { "type": "string", "example": "SL00000001" } },
+        "required": ["seal_code"]
+      },
+      "RemakeRequest": {
+        "type": "object",
+        "properties": {
+          "reason": { "type": "string", "enum": ["remake_stale", "wrong_cup", "remark_missed", "leak"], "default": "remake_stale" }
+        }
+      },
+      "AcceptanceRequest": {
+        "type": "object",
+        "properties": {
+          "mode": { "type": "string", "enum": ["open", "throttled", "paused"] },
+          "note": { "type": "string" }
+        },
+        "required": ["mode"]
+      },
+      "ReplenishRequest": {
+        "type": "object",
+        "properties": {
+          "ingredient_id": { "type": "integer" },
+          "qty": { "type": "number" }
+        },
+        "required": ["ingredient_id", "qty"]
+      },
+      "ThreadRequest": {
+        "type": "object",
+        "properties": { "message": { "type": "string" } },
+        "required": ["message"]
+      },
+      "AmountRequest": {
+        "type": "object",
+        "properties": { "amount": { "type": "number" } },
+        "required": ["amount"]
+      },
+      "ReviewRequest": {
+        "type": "object",
+        "properties": { "content": { "type": "string" } },
+        "required": ["content"]
+      },
+      "ClockRequest": {
+        "type": "object",
+        "properties": { "offset_secs": { "type": "integer", "description": "演示时钟偏移秒数；0 恢复真实时间" } },
+        "required": ["offset_secs"]
+      },
+      "Incident": {
+        "type": "object",
+        "description": "把门店/店员/骑手/顾客/平台客服/财务关联到同一订单的异常单"
+      },
+      "StoreDailyMetric": {
+        "type": "object",
+        "properties": {
+          "store_code": { "type": "string" },
+          "day": { "type": "string" },
+          "slow_orders": { "type": "integer" },
+          "wrong_cup_count": { "type": "integer" },
+          "missing_utensils": { "type": "integer" },
+          "remake_count": { "type": "integer" },
+          "platform_cancels": { "type": "integer" },
+          "leak_count": { "type": "integer" },
+          "remake_cost": { "type": "number" },
+          "compensation_cost": { "type": "number" },
+          "rider_wait_comp": { "type": "number" },
+          "cancel_loss": { "type": "number" },
+          "revenue": { "type": "number" },
+          "gross_profit": { "type": "number" },
+          "net_profit": { "type": "number" },
+          "profit_impact_total": { "type": "number" }
+        }
+      },
+      "ShiftScore": {
+        "type": "object",
+        "properties": {
+          "shift_id": { "type": "integer" },
+          "store_code": { "type": "string" },
+          "day": { "type": "string" },
+          "shift_name": { "type": "string" },
+          "leader_name": { "type": "string" },
+          "remake_count": { "type": "integer" },
+          "remake_cost": { "type": "number" },
+          "score": { "type": "number" },
+          "review_count": { "type": "integer" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/healthz": {
+      "get": { "tags": ["auth"], "summary": "健康检查", "responses": { "200": { "description": "OK" } } }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": ["auth"], "summary": "员工登录（区域经理/督导/店员/客服/财务）",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } } },
+        "responses": {
+          "200": { "description": "登录成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TokenResponse" } } } },
+          "401": { "description": "账号或密码错误", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/auth/customer-login": {
+      "post": {
+        "tags": ["auth"], "summary": "顾客登录码登录",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "access_code": { "type": "string" } }, "required": ["access_code"] } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TokenResponse" } } } }, "401": { "description": "登录码无效" } }
+      }
+    },
+    "/api/auth/rider-login": {
+      "post": {
+        "tags": ["auth"], "summary": "骑手编号登录",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "rider_code": { "type": "string" } }, "required": ["rider_code"] } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TokenResponse" } } } }, "401": { "description": "骑手编号无效" } }
+      }
+    },
+    "/api/platform/orders": {
+      "post": {
+        "tags": ["platform"], "security": [{ "PlatformKey": [] }],
+        "summary": "外卖平台下单接入（产能/爆单/库存校验，扣原料、生成杯与封签、杯贴、入出杯队列）",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AcceptOrderRequest" } } } },
+        "responses": {
+          "200": { "description": "接单成功", "content": { "application/json": { "schema": { "type": "object", "properties": { "order_id": { "type": "integer" }, "message": { "type": "string" }, "queue": { "type": "string" } } } } } },
+          "401": { "description": "平台密钥无效" },
+          "409": { "description": "单号重复/爆单暂停/库存不足/商品临时下架/爆单限流(429)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "429": { "description": "门店爆单限流，临时限制接单" }
+        }
+      }
+    },
+    "/api/products": {
+      "get": { "tags": ["catalog"], "summary": "商品列表（美式/拿铁/冷萃/果咖/轻食/组合套餐）", "responses": { "200": { "description": "OK" } } }
+    },
+    "/api/stores": {
+      "get": { "tags": ["catalog"], "summary": "门店列表与接单状态", "responses": { "200": { "description": "OK" } } }
+    },
+    "/api/orders": {
+      "get": {
+        "tags": ["orders"], "security": [{ "BearerAuth": [] }], "summary": "订单列表（店员限本门店；可按 status 过滤）",
+        "parameters": [
+          { "name": "store_id", "in": "query", "schema": { "type": "integer" } },
+          { "name": "status", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/orders/{id}": {
+      "get": {
+        "tags": ["orders"], "security": [{ "BearerAuth": [] }], "summary": "订单详情（含明细、每杯封签码与状态、袋数、异常单ID）",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "OK" }, "404": { "description": "订单不存在" } }
+      }
+    },
+    "/api/orders/{id}/rider-arrive": {
+      "post": {
+        "tags": ["orders"], "security": [{ "BearerAuth": [] }],
+        "summary": "骑手到店打卡；若饮品未出杯，生成『骑手提前到店等待』异常并联动门店",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "打卡成功" }, "409": { "description": "重复打卡/订单已取消或已交接" } }
+      }
+    },
+    "/api/orders/{id}/handover": {
+      "post": {
+        "tags": ["orders"], "security": [{ "BearerAuth": [] }],
+        "summary": "到店交接核验：订单号/杯数、袋数、冷热分袋、吸管餐具；未出齐返回409，不符项自动开异常并留痕",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HandoverRequest" } } } },
+        "responses": {
+          "200": { "description": "核验结果（passed=true 时完成交接）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HandoverResult" } } } },
+          "409": { "description": "饮品尚未出齐，暂不能交接" }
+        }
+      }
+    },
+    "/api/orders/{id}/deliver": {
+      "post": {
+        "tags": ["orders"], "security": [{ "BearerAuth": [] }], "summary": "骑手确认送达",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "已送达" }, "409": { "description": "订单未交接" } }
+      }
+    },
+    "/api/orders/{id}/report": {
+      "post": {
+        "tags": ["incidents"], "security": [{ "BearerAuth": [] }],
+        "summary": "上报异常：备注漏看/错杯/轻食缺货(触发临时下架)/平台取消(释放原料报损)/顾客漏液投诉(生成赔付方案)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReportRequest" } } } },
+        "responses": { "200": { "description": "返回 incident_id" }, "400": { "description": "异常类型非法" } }
+      }
+    },
+    "/api/cups/{id}/start": {
+      "post": {
+        "tags": ["production"], "security": [{ "BearerAuth": [] }], "summary": "咖啡师按出杯顺序开始制作",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "进入制作中" }, "409": { "description": "杯不在待制作状态" } }
+      }
+    },
+    "/api/cups/seal-scan": {
+      "post": {
+        "tags": ["production"], "security": [{ "BearerAuth": [] }],
+        "summary": "店员扫描封签码，饮品进入待取区；订单全部出杯时校验出杯SLA，超时联动骑手等待异常",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SealScanRequest" } } } },
+        "responses": { "200": { "description": "入待取区" }, "404": { "description": "封签码无效" }, "409": { "description": "杯未在制作中" } }
+      }
+    },
+    "/api/cups/{id}/remake": {
+      "post": {
+        "tags": ["production"], "security": [{ "BearerAuth": [] }],
+        "summary": "确认重做：旧杯报损（重做成本进班组复盘）、额外消耗原料、生成新杯带新封签重新入队",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RemakeRequest" } } } },
+        "responses": { "200": { "description": "返回 old_cup_id/new_cup_id" } }
+      }
+    },
+    "/api/stores/{code}/board": {
+      "get": {
+        "tags": ["store"], "security": [{ "BearerAuth": [] }], "summary": "骑手到店屏：队列深度、待取区订单、已到店等待骑手、过久杯数、接单状态",
+        "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/stores/{code}/queue": {
+      "get": {
+        "tags": ["store"], "security": [{ "BearerAuth": [] }], "summary": "门店出杯顺序队列（queue_seq、商品、糖度杯型备注、封签码、状态）",
+        "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/stores/{code}/events": {
+      "get": {
+        "tags": ["store"], "security": [{ "BearerAuth": [] }], "summary": "门店实时事件流（制作/封签/交接/重做/异常/赔付）",
+        "parameters": [
+          { "name": "code", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/stores/{code}/inventory": {
+      "get": {
+        "tags": ["store"], "security": [{ "BearerAuth": [] }], "summary": "门店原料库存",
+        "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/stores/{code}/losses": {
+      "get": {
+        "tags": ["store"], "security": [{ "BearerAuth": [] }], "summary": "门店异常报损记录（重做/错杯/取消在制）",
+        "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/stores/{code}/replenish": {
+      "post": {
+        "tags": ["store"], "security": [{ "BearerAuth": [] }], "summary": "原料补货",
+        "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReplenishRequest" } } } },
+        "responses": { "200": { "description": "补货成功" } }
+      }
+    },
+    "/api/stores/{code}/acceptance": {
+      "post": {
+        "tags": ["store"], "security": [{ "BearerAuth": [] }],
+        "summary": "爆单保护：open 正常接单 / throttled 限流 / paused 临时限制接单（队列超阈值也会自动限流）",
+        "parameters": [{ "name": "code", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AcceptanceRequest" } } } },
+        "responses": { "200": { "description": "状态已更新" } }
+      }
+    },
+    "/api/incidents": {
+      "get": {
+        "tags": ["incidents"], "security": [{ "BearerAuth": [] }], "summary": "异常事件列表（可按门店/状态过滤）",
+        "parameters": [
+          { "name": "store_id", "in": "query", "schema": { "type": "integer" } },
+          { "name": "status", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/incidents/{id}": {
+      "get": {
+        "tags": ["incidents"], "security": [{ "BearerAuth": [] }],
+        "summary": "异常详情：六方（门店/店员/骑手/顾客/平台客服/财务）、时间线留言、赔付方案",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Incident" } } } } }
+      }
+    },
+    "/api/incidents/{id}/threads": {
+      "post": {
+        "tags": ["incidents"], "security": [{ "BearerAuth": [] }],
+        "summary": "六方在同一异常单留言；平台客服/财务首次留言自动认领",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ThreadRequest" } } } },
+        "responses": { "200": { "description": "留言成功" } }
+      }
+    },
+    "/api/incidents/{id}/resolve": {
+      "post": {
+        "tags": ["incidents"], "security": [{ "BearerAuth": [] }],
+        "summary": "复盘关闭异常（有待审批赔付时禁止关闭）",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "已关闭" }, "409": { "description": "仍有待财务审批的赔付" } }
+      }
+    },
+    "/api/incidents/{id}/rider-wait-comp": {
+      "post": {
+        "tags": ["incidents"], "security": [{ "BearerAuth": [] }],
+        "summary": "平台客服为提前到店等待的骑手发起等待补贴（提交财务审批）",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AmountRequest" } } } },
+        "responses": { "200": { "description": "返回 compensation_id" } }
+      }
+    },
+    "/api/compensations/{id}/approve": {
+      "post": {
+        "tags": ["finance"], "security": [{ "BearerAuth": [] }], "summary": "财务批准赔付（门店承担部分计入班组补偿成本）",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "content": { "application/json": { "schema": { "type": "object", "properties": { "note": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "已批准" }, "409": { "description": "赔付已处理" } }
+      }
+    },
+    "/api/compensations/{id}/reject": {
+      "post": {
+        "tags": ["finance"], "security": [{ "BearerAuth": [] }], "summary": "财务驳回赔付",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "已驳回" } }
+      }
+    },
+    "/api/compensations/{id}/pay": {
+      "post": {
+        "tags": ["finance"], "security": [{ "BearerAuth": [] }], "summary": "财务放款（批准后）",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "已放款" }, "409": { "description": "方案不存在或未批准" } }
+      }
+    },
+    "/api/delistings": {
+      "get": {
+        "tags": ["store"], "security": [{ "BearerAuth": [] }], "summary": "临时下架记录（缺货触发；可只看 active=true）",
+        "parameters": [
+          { "name": "store_id", "in": "query", "schema": { "type": "integer" } },
+          { "name": "active", "in": "query", "schema": { "type": "boolean" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/delistings/{id}/restore": {
+      "post": {
+        "tags": ["store"], "security": [{ "BearerAuth": [] }], "summary": "补货后恢复上架",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "已恢复" }, "404": { "description": "下架记录不存在或已恢复" } }
+      }
+    },
+    "/api/shifts/{id}/reviews": {
+      "post": {
+        "tags": ["analysis"], "security": [{ "BearerAuth": [] }], "summary": "区域督导对班组提交复盘（重做成本等已在班组指标中）",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReviewRequest" } } } },
+        "responses": { "200": { "description": "复盘已保存" } }
+      }
+    },
+    "/api/manager/store-metrics": {
+      "get": {
+        "tags": ["analysis"], "security": [{ "BearerAuth": [] }],
+        "summary": "区域经理按门店按天：出杯慢/错杯/漏餐具/重做/平台取消对利润的影响",
+        "parameters": [
+          { "name": "region_id", "in": "query", "schema": { "type": "integer" } },
+          { "name": "store_id", "in": "query", "schema": { "type": "integer" } },
+          { "name": "from", "in": "query", "schema": { "type": "string", "format": "date" } },
+          { "name": "to", "in": "query", "schema": { "type": "string", "format": "date" } }
+        ],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/StoreDailyMetric" } } } } } }
+      }
+    },
+    "/api/supervisor/shift-scores": {
+      "get": {
+        "tags": ["analysis"], "security": [{ "BearerAuth": [] }], "summary": "门店班组评分列表（含重做成本/补偿/取消损失，供督导同步复盘）",
+        "parameters": [
+          { "name": "region_id", "in": "query", "schema": { "type": "integer" } },
+          { "name": "store_id", "in": "query", "schema": { "type": "integer" } },
+          { "name": "from", "in": "query", "schema": { "type": "string", "format": "date" } },
+          { "name": "to", "in": "query", "schema": { "type": "string", "format": "date" } }
+        ],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ShiftScore" } } } } } }
+      }
+    },
+    "/api/demo/clock": {
+      "post": {
+        "tags": ["demo"], "security": [{ "BearerAuth": [] }],
+        "summary": "设置演示时钟偏移（秒），用于模拟骑手提前到店、饮品放置过久；0 恢复真实时间",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClockRequest" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/admin/stale-sweep": {
+      "post": {
+        "tags": ["demo"], "security": [{ "BearerAuth": [] }],
+        "summary": "立即扫描全部门店待取区，将超过门店 stale_after_secs 的杯标记过久并生成重做异常（服务默认每60秒自动执行）",
+        "responses": { "200": { "description": "扫描完成" } }
+      }
+    }
+  }
+}
